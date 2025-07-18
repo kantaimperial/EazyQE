@@ -1,0 +1,178 @@
+#!/usr/bin/env python3.11
+import os
+import re
+import math
+#import pymategen
+from pymatgen.core.structure import Structure
+from pymatgen.core import Element
+
+# ============================
+# 🔍 CIFファイル自動検出
+# ============================
+cif_files = [f for f in os.listdir('.') if f.lower().endswith('.cif')]
+if not cif_files:
+    raise FileNotFoundError("⚠️ CIFファイルが見つかりません。同じディレクトリに .cif ファイルを置いてください。")
+import_file = cif_files[0]
+print(f"🔎 検出された CIF ファイル: {import_file}")
+
+# ============================
+# 🔧 パラメータ設定
+# ============================
+name = os.path.splitext(import_file)[0]
+usp_files_dir = "/LARGE0/gr10622/common/QE/pseudo/pslibrary.1.0.0/pbe/PSEUDOPOTENTIALS"
+file_name = "INCAR.in"
+
+# ============================
+# 📦 構造読み込み
+# ============================
+cif_crystal = Structure.from_file(import_file)
+crystal_lattice = cif_crystal.lattice.matrix
+crystal_atom_num = len(cif_crystal)
+crystal_atom_kind = cif_crystal.atomic_numbers
+
+# ============================
+# 🔬 ATOMIC_SPECIES 自動生成
+# ============================
+species_list = []
+for el in sorted(cif_crystal.composition.elements, key=lambda x: x.symbol):
+    symbol = el.symbol
+    mass = Element(symbol).atomic_mass
+    # 擬ポテンシャル接尾辞決定
+    non_ele = {"H", "He"}
+    s_ele = {"Li"}
+    spn_ele = {"Na", "K", "Ca", "Sc", "Ti", "Cr", "Mn", "Fe", "Ni", "Co", "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Cs", "Ba", "Hf", "W", "Re", "Os", "Yb"}
+    spdn_ele = {"Lu", "Fr", "Ra", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm"}
+    spfn_ele = {"Ta", "La", "Ac", "Th", "Pa", "U", "Np", "Pu"}
+    spnl = {"Mg", "V"}
+    dn_ele = {"Cu", "Ga", "Ge", "Se", "Br", "Kr", "In", "Sn", "Xe", "Tl", "Pb", "Bi", "Po", "At", "Rn"}
+    dnl_ele = {"Zn"}
+    if symbol in non_ele:
+        suffix = ""
+    elif symbol in s_ele:
+        suffix = "sl"
+    elif symbol in spn_ele:
+        suffix = "spn"
+    elif symbol in spdn_ele:
+        suffix = "spdn"
+    elif symbol in spfn_ele:
+        suffix = "spfn"
+    elif symbol in spnl:
+        suffix = "spnl"
+    elif symbol in dn_ele:
+        suffix = "dn"
+    elif symbol in dnl_ele:
+        suffix = "dnl"
+    else:
+        suffix = "n"
+    pseudo = f"{symbol}.pbe-{suffix}-kjpaw_psl.1.0.0.UPF" if suffix else f"{symbol}.pbe-kjpaw_psl.1.0.0.UPF"
+    species_list.append(f"{symbol:<2}  {mass:.4f}  {pseudo}")
+atomic_species_txt = "ATOMIC_SPECIES\n" + "\n".join(species_list) + "\n"
+
+# ============================
+# 🧾 各セクション テキスト作成
+# ============================
+control_txt = f"""&control
+  calculation   = 'scf',        ! calculation = 'vc-relax'  ! for structure relaxation
+                                 ! calculation = 'scf' then 'nscf'      ! for DOS
+                                 ! calculation = 'bands'     ! for band structure
+  prefix        = '{name}',
+  pseudo_dir    = \"{usp_files_dir}\",
+  outdir        = './tmp/',
+  verbosity     = 'high',
+  nstep         = 200,
+  etot_conv_thr = 1.d-5 ! default 1d.-4
+  forc_conv_thr = 5.d-4 ! default 1d.-3
+/"""
+
+system_txt = f"""&system                         ! HSE: input_dft='hse', exx_fraction=0.25, screening_parameter=0.11
+                      ! occupations = 'tetrahedra'  ! for DOS
+                      ! occupations = 'fixed'      ! for bands
+                      ! nbnd = 40                  ! add for nscf/bands
+  ibrav         = 0,
+  ntyp          = {len(set(crystal_atom_kind))},
+  nat           = {crystal_atom_num},
+  ecutwfc       = 50.0,  ! pbesol may need larger E_cut
+  ecutrho       = 400.0,
+  occupations   = 'smearing',
+  smearing      = "gaussian", ! "mp" for metal "gaussian" for semiconductor and unknown
+  degauss       = 0.01,
+  !vdw_corr     = "DFT-D3",
+  !dftd3_version= 3,
+  !nspin        = 2,
+  !starting_magnetization(1) = -0.6,
+  !starting_magnetization(2) = 0.6,
+/"""
+
+electrons_txt = """&electrons     ! default for all calc types
+  conv_thr         = 1.0d-8,
+  mixing_beta      = 0.2,
+  diagonalization  = 'rmm-davidson',   ! "cg", "david" or "rmm-davidson"
+  electron_maxstep = 300,
+  diago_david_ndim = 4,
+/"""
+
+ions_comment = """! &ions                     ! uncomment for 'relax' or 'vc-relax'
+!   ion_dynamics = 'bfgs',
+! /
+"""
+
+cell_comment = """! &cell                     ! uncomment for 'vc-relax'
+!   cell_dynamics = 'bfgs',
+!   press_conv_thr = 0.5,
+! /
+"""
+
+# ============================
+# 📍 ATOMIC_POSITIONS 自動生成
+# ============================
+atom_posi_txt = "ATOMIC_POSITIONS crystal\n"
+for site in cif_crystal.sites:
+    raw = site.species_string
+    symbol = re.match(r"[A-Za-z]+", raw).group(0)
+    fcoords = site.frac_coords
+    atom_posi_txt += f"{symbol:<3} {fcoords[0]:.9f} {fcoords[1]:.9f} {fcoords[2]:.9f}\n"
+
+# ============================
+# 🗺 CELL_PARAMETERS 自動生成
+# ============================
+cell_txt = "CELL_PARAMETERS angstrom\n"
+for row in crystal_lattice:
+    cell_txt += "  " + "  ".join([f"{v:.9f}" for v in row]) + "\n"
+
+# ============================
+# 🎯 K_POINTS 自動生成 from cell parameters
+# ============================
+# 目標 k-point 間隔 (Å^-1) を指定して自動計算
+delta_k = 0.2
+rec_lat = cif_crystal.lattice.reciprocal_lattice_crystallographic
+b_lengths = rec_lat.lengths  # Å^-1
+kgrid = [max(1, math.ceil(bl / delta_k)) for bl in b_lengths]
+k_point_txt = f"""K_POINTS automatic
+{kgrid[0]} {kgrid[1]} {kgrid[2]} 0 0 0
+"""
+
+# ============================
+# ⭐ HUBBARD コメント出力
+# ============================
+hubbard_txt = """!HUBBARD (ortho-atomic)
+!U Mn-3d 5.0
+"""
+
+# ============================
+# 💾 ファイル書き出し
+# ============================
+with open(file_name, 'w') as f:
+    f.write(
+        control_txt + "\n" +
+        system_txt + "\n" +
+        electrons_txt + "\n" +
+        ions_comment + "\n" +
+        cell_comment + "\n" +
+        atomic_species_txt + "\n" +
+        atom_posi_txt + "\n" +
+        cell_txt + "\n" +
+        k_point_txt + "\n" +
+        hubbard_txt
+    )
+print(f"✅ SCF入力ファイルを出力しました → {file_name}")
+
