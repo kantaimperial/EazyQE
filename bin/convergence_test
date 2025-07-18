@@ -1,0 +1,46 @@
+#!/bin/bash
+
+source ./CONFIG
+base_input="INCAR.in"
+
+if [ ! -f "$base_input" ]; then
+  echo "Error: $base_input がありません"
+  exit 1
+fi
+
+# ENCUT 収束テスト
+if [ "$conv_encut" = "1" ]; then
+  for ecut in $(seq $encut_start $encut_step $encut_end); do
+    dir="ecut_${ecut}Ry"
+    mkdir -p $dir
+
+    # ecutrho を計算
+    rho=$(echo "$ecut * 10" | bc)
+
+    sed -e "s/ecutwfc *= *[0-9.]\+/ecutwfc = $ecut/" \
+        -e "s/ecutrho *= *[0-9.]\+/ecutrho = $rho/" \
+        "$base_input" > "$dir/INCAR.in"
+    cp job $dir/
+    if [ "$run_qe" = "1" ]; then
+      echo "Running $name: ecutwfc = $ecut, ecutrho = $rho"
+      (cd $dir && sbatch job)
+    fi
+  done
+fi
+
+# KPOINT収束テスト
+if [ "$conv_kpoint" = "1" ]; then
+  IFS=',' read -ra KPOINT_LIST <<< "$kpoints"
+  for kp in "${KPOINT_LIST[@]}"; do
+    kp_sanitized=$(echo $kp | tr -d ' ')
+    dir="kpt_${kp_sanitized}"
+    mkdir -p $dir
+
+    sed "/K_POINTS automatic/{n;s/.*/ $kp 0 0 0/}" "$base_input" > "$dir/INCAR.in"
+    cp job $dir/
+    if [ "$run_qe" = "1" ]; then
+      echo "Running $name: KPOINTS = $kp"
+      (cd $dir && sbatch job)
+    fi
+  done
+fi

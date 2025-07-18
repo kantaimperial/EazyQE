@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+import numpy as np
+import matplotlib.pyplot as plt
+import argparse
+import os
+import re
+
+def read_band_dat(filename):
+    kpoints = []
+    energies = []
+    with open(filename, 'r') as f:
+        lines = f.readlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line or line.startswith("&"):
+            i += 1
+            continue
+        parts = line.split()
+        if len(parts) == 3:
+            kpoints.append(list(map(float, parts)))
+            i += 1
+            energy_vals = []
+            while i < len(lines):
+                next_line = lines[i].strip()
+                if not next_line or len(next_line.split()) == 3:
+                    break
+                energy_vals.extend(map(float, next_line.split()))
+                i += 1
+            energies.append(energy_vals)
+        else:
+            i += 1
+    return np.array(kpoints), np.array(energies)
+
+def compute_k_distances(kpoints):
+    distances = [0.0]
+    for i in range(1, len(kpoints)):
+        dk = np.linalg.norm(kpoints[i] - kpoints[i - 1])
+        distances.append(distances[-1] + dk)
+    return np.array(distances)
+
+def find_jump_segments(kpoints, threshold=2.5):
+    diffs = np.linalg.norm(np.diff(kpoints, axis=0), axis=1)
+    avg = np.mean(diffs)
+    segments = []
+    jump_indices = []
+    start = 0
+    for i in range(1, len(kpoints)):
+        if diffs[i - 1] > threshold * avg:
+            segments.append((start, i))
+            jump_indices.append(i)
+            start = i
+    segments.append((start, len(kpoints)))
+    return segments, jump_indices
+
+def read_highsym_kpoints(filename="INCAR.in"):
+    with open(filename, 'r') as f:
+        lines = f.readlines()
+    kpoints = []
+    labels = []
+    reading = False
+    for line in lines:
+        if line.strip().lower().startswith("k_points") and "crystal_b" in line.lower():
+            reading = True
+            continue
+        if reading:
+            if re.match(r"^\s*\d+\s*$", line):
+                continue
+            parts = line.strip().split("!")
+            coords = list(map(float, parts[0].split()[:3]))
+            label = parts[1].strip() if len(parts) > 1 else None
+            if label:
+                label = label.replace("\\Gamma", "Γ").replace("\"", "").replace("'", "")
+                kpoints.append(coords)
+                labels.append(label)
+    return np.array(kpoints), labels
+
+def read_cell_and_alat(filename="INCAR.in"):
+    cell = []
+    reading = False
+    with open(filename, 'r') as f:
+        for line in f:
+            if line.strip().lower().startswith("cell_parameters"):
+                reading = True
+                continue
+            if reading and len(cell) < 3:
+                parts = line.strip().split()
+                if len(parts) >= 3:
+                    cell.append(list(map(float, parts[:3])))
+            if len(cell) == 3:
+                break
+    cell = np.array(cell)
+    alat = np.linalg.norm(cell[0])
+    return cell, alat
+
+def sequential_match_labels(band_kpoints, highsym_kpoints, labels, cell, alat, tol=1e-3):
+    recip = 2 * np.pi * np.linalg.inv(cell).T
+    highsym_cart = highsym_kpoints @ recip
+    highsym_scaled = highsym_cart * alat / (2 * np.pi)
+
+    matched_pos = []
+    matched_labels = []
+    start_idx = 0
+    for sym_k, label in zip(highsym_scaled, labels):
+        for i in range(start_idx, len(band_kpoints)):
+            dist = np.linalg.norm(band_kpoints[i] - sym_k)
+            if dist < tol:
+                matched_pos.append(i)
+                matched_labels.append(label)
+                start_idx = i + 1
+                break
+        else:
+            print(f"⚠️ Warning: No match for {label}")
+    return matched_pos, matched_labels
+
+def find_fermi_from_findgap(filename="findgap.out"):
+    if not os.path.exists(filename):
+        return None
+    with open(filename, 'r') as f:
+        for line in f:
+            if "VBM" in line:
+                match = re.search(r"VBM\s*=\s*([-+]?[0-9]*\.?[0-9]+)", line)
+                if match:
+                    return float(match.group(1))
+    return None
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("banddat", help="Path to band.dat")
+    parser.add_argument("--EFermi", type=float, default=None, help="Manual EFermi if findgap.out not present")
+    args = parser.parse_args()
+
+    EFermi = find_fermi_from_findgap()
+    if EFermi is None:
+        EFermi = args.EFermi if args.EFermi is not None else 0.0
+        if args.EFermi is None:
+            print("⚠️ Warning: No findgap.out or --EFermi. Using EFermi = 0.0")
+    print(f"Using EFermi = {EFermi:.3f} eV")
+
+    full_kpoints, full_energies = read_band_dat(args.banddat)
+    full_energies -= EFermi
+    full_k_dist = compute_k_distances(full_kpoints)
+
+    mask = np.any((full_energies > -6) & (full_energies < 6), axis=1)
+    kpoints = full_kpoints[mask]
+    energies = full_energies[mask]
+    k_dist = full_k_dist[mask]
+
+    segments, jump_indices = find_jump_segments(kpoints)
+
+    highsym_kpoints, highsym_labels = read_highsym_kpoints("INCAR.in")
+    cell, alat = read_cell_and_alat("INCAR.in")
+
+    matched_pos, matched_labels = sequential_match_labels(full_kpoints, highsym_kpoints, highsym_labels, cell, alat)
+    k_label_positions = [full_k_dist[i] for i in matched_pos]
+    k_label_names = matched_labels
+
+    x_all_min = min(k_label_positions + [k_dist.min()])
+    x_all_max = max(k_label_positions + [k_dist.max()])
+
+    plt.figure(figsize=(6, 4))
+    for band_idx in range(energies.shape[1]):
+        for start, end in segments:
+            x = k_dist[start:end]
+            y = energies[start:end, band_idx]
+            x = np.array(x)
+            y = np.array(y)
+            below = y < 0
+            above = y >= 0
+            if np.any(below):
+                plt.plot(x[below], y[below], color='orange', linewidth=1)
+            if np.any(above):
+                plt.plot(x[above], y[above], color='blue', linewidth=1)
+
+    vertical_lines = set()
+    for idx in jump_indices:
+        if 0 <= idx - 1 < len(k_dist):
+            vertical_lines.add(k_dist[idx - 1])
+        if idx < len(k_dist):
+            vertical_lines.add(k_dist[idx])
+    for xpos in sorted(vertical_lines):
+        plt.axvline(xpos, color='gray', linestyle='--', linewidth=0.8)
+
+    for xpos in k_label_positions:
+        plt.axvline(xpos, color='black', linestyle='-', linewidth=0.6)
+
+    plt.xticks(k_label_positions, k_label_names)
+    plt.axhline(0, linestyle='--', color='gray', linewidth=0.5)
+    # plt.xlabel("Wavevector")
+    plt.ylabel("Energy (eV)")
+    plt.ylim(-6, 6)
+    plt.xlim(x_all_min, x_all_max)
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("band.pdf")
+    print("✅ band.pdf を保存しました")
+    plt.show()
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+import os, re, argparse, glob
+import numpy as np
+import matplotlib.pyplot as plt
+from collections import defaultdict
+
+#--- args ---
+p = argparse.ArgumentParser(description="Plot spin-resolved PDOS (atom/orbital filter)")
+p.add_argument("--EFermi", type=float, default=None, help="0 シフトするフェルミ準位 (eV)")
+p.add_argument("--atoms", type=str, default=None,
+               help="カンマ区切り元素指定 (例: Bi,Co1,Co2)。未指定で全元素")
+p.add_argument("--orbital", type=str, default=None,
+               help="分解描画する軌道指定 Atom.orb (例: Co1.d)")
+p.add_argument("--xmin", type=float, default=-6.0)
+p.add_argument("--xmax", type=float, default=6.0)
+p.add_argument("--ymax", type=float, default=None)
+p.add_argument("--lloc", type=str, default="upper right")
+p.add_argument("--lloc_x", type=float, default=1.5)
+p.add_argument("--lloc_y", type=float, default=1.0)
+p.add_argument("--no-total", action="store_true")
+args = p.parse_args()
+
+#--- EFermi 自動取得 ---
+if args.EFermi is None:
+    for fn in ("get_gap.out","./get_gap.out"):
+        if os.path.exists(fn):
+            with open(fn) as f:
+                for L in f:
+                    if L.startswith("VBM:"):
+                        args.EFermi = float(L.split()[1])
+                        print(f"📥 EFermi = {args.EFermi} eV (from {fn})")
+                        break
+            break
+if args.EFermi is None:
+    raise RuntimeError("EFermi が指定されていません。--EFermi または get_gap.out を用いてください。")
+
+#--- フィルタ設定 ---
+atoms_filter = args.atoms.split(",") if args.atoms else None
+orb_atom, orb_type = None, None
+if args.orbital:
+    if "." not in args.orbital:
+        raise ValueError("--orbital は AtomName.orbital の形式")
+    orb_atom, orb_type = args.orbital.split(".",1)
+
+#--- 軌道ラベル ---
+orb_labels = {
+    "d": ["dz2","dzx","dzy","dx2-y2","dxy"],
+    "p": ["pz","px","py"],
+}
+
+#--- ファイル収集 ---
+pdos_files = [f for f in os.listdir(".") if re.search(r"pdos_atm#\d+\(",f)]
+if not pdos_files:
+    print("⚠️ pdos_atm ファイルが見つかりませんでした。カレントディレクトリを確認してください。")
+file_map = defaultdict(list)
+
+# --- ファイル分類 ---
+pat = re.compile(r"atm#\d+\(([^)]+)\)_wfc#\d+\((\w+)\)")
+for f in pdos_files:
+    m = pat.search(f)
+    if not m:
+        continue
+    full = m.group(1)
+    orb  = m.group(2)
+    m2 = re.match(r"([A-Za-z]+)(\d+)$", full)
+    atom = full if not m2 else f"{m2.group(1)}{m2.group(2)}"
+    key = f"{atom}-{orb}"
+    file_map[key].append(f)
+
+print("🔍 見つかった pdos_atm keys:")
+for k in sorted(file_map): print("   ", k)
+
+#--- 読み込み ---
+def read_basic(fn, shift):
+    E, UP, DW = [],[],[]
+    with open(fn) as f:
+        for L in f:
+            if L.strip().startswith("#"): continue
+            parts=L.split()
+            if len(parts)<3: continue
+            e = float(parts[0]) - shift
+            UP.append(float(parts[1].replace("D","E")))
+            DW.append(float(parts[2].replace("D","E")))
+            E.append(e)
+    return np.array(E), np.array(UP), np.array(DW)
+
+def read_decomp(fn, shift, orb):
+    labels = orb_labels.get(orb)
+    n = len(labels)
+    UPs=[[] for _ in range(n)]; DWs=[[] for _ in range(n)]; E=[]
+    with open(fn) as f:
+        for L in f:
+            if L.strip().startswith("#"): continue
+            parts=L.split()
+            if len(parts) < 3+2*n: continue
+            e=float(parts[0])-shift; E.append(e)
+            base=3
+            for i in range(n):
+                UPs[i].append(float(parts[base+2*i].replace("D","E")))
+                DWs[i].append(float(parts[base+2*i+1].replace("D","E")))
+    return np.array(E), [np.array(u) for u in UPs], [np.array(d) for d in DWs]
+
+#--- plot ---
+plt.figure(figsize=(7,4))
+colors = plt.cm.tab10.colors
+idx=0; plotted=False
+
+for key, flist in sorted(file_map.items()):
+    atom, orb = key.split("-")
+    if atoms_filter and atom not in atoms_filter: continue
+    decomp = (atom==orb_atom and orb==orb_type)
+    if args.orbital and not decomp: continue
+
+    if decomp:
+        fn=flist[0]
+        E, UPs, DWs = read_decomp(fn, args.EFermi, orb_type)
+        for i,label in enumerate(orb_labels[orb_type]):
+            c=colors[idx%10]
+            plt.plot(E, UPs[i],  color=c, lw=1.2, label=f"{atom}.{label} ↑")
+            plt.fill_between(E, 0, UPs[i], color=c, alpha=0.3)
+            plt.plot(E, -DWs[i], color=c, lw=1.2)
+            plt.fill_between(E, 0, -DWs[i], color=c, alpha=0.3)
+            idx+=1; plotted=True
+    else:
+        E0, U0, D0 = None, None, None
+        for fn in flist:
+            E, UP, DW = read_basic(fn, args.EFermi)
+            if E0 is None:
+                E0,U0,D0 = E.copy(), UP.copy(), DW.copy()
+            else:
+                U0+=UP; D0+=DW
+        c=colors[idx%10]
+        plt.plot(E0, U0,  color=c, lw=1.2, label=f"{atom}-{orb} ↑")
+        plt.fill_between(E0, 0, U0, color=c, alpha=0.3)
+        plt.plot(E0,-D0,  color=c, lw=1.2)
+        plt.fill_between(E0, 0, -D0, color=c, alpha=0.3)
+        idx+=1; plotted=True
+
+#--- total ---
+if not args.no_total:
+    tots = [f for f in os.listdir(".") if f.endswith(".pdos_tot")]
+    if tots:
+        E_t, U_t, D_t = read_basic(tots[0], args.EFermi)
+        plt.plot(E_t, U_t,  color="gray", lw=1.2, label="Total ↑")
+        plt.fill_between(E_t, 0, U_t, color="gray", alpha=0.3)
+        plt.plot(E_t,-D_t,  color="gray", lw=1.2)
+        plt.fill_between(E_t, 0, -D_t, color="gray", alpha=0.3)
+        plotted=True
+
+#--- finalize ---
+if not plotted:
+    print("⚠️ 実際にプロットされたデータがありませんでした。フィルタ条件を確認してください。")
+    exit(1)
+
+plt.axvline(0, color="gray", ls="--")
+plt.axhline(0, color="black", lw=0.5)
+plt.xlim(args.xmin, args.xmax)
+if args.ymax: plt.ylim(-args.ymax, args.ymax)
+plt.xlabel("Energy (eV)"); plt.ylabel("DOS (states/eV)")
+plt.title("Spin-polarized PDOS")
+# --- 凡例の表示 ---
+if args.lloc_x is not None and args.lloc_y is not None:
+    # 座標指定があれば常に bbox_to_anchor で表示（manual以外でも有効）
+    plt.legend(fontsize=10, loc=args.lloc, bbox_to_anchor=(args.lloc_x, args.lloc_y))
+else:
+    # 通常の loc 指定（文字列: 'best', 'upper right' など）
+    plt.legend(fontsize=10, loc=args.lloc)
+
+plt.tight_layout()
+plt.savefig("pdos.pdf")
+print("✅ pdos.pdf saved")
+

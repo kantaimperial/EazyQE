@@ -1,0 +1,184 @@
+#!/usr/bin/env python3.11
+import os
+import re
+import argparse
+import numpy as np
+import matplotlib.pyplot as plt
+from collections import defaultdict
+
+# --- 引数処理 ---
+parser = argparse.ArgumentParser(description="Plot non‐spin PDOS with optional filtering and decomposition")
+parser.add_argument("--EFermi", type=float, default=None,
+                    help="VBMやフェルミ準位 (eV) を0にシフト")
+parser.add_argument("--atoms", type=str, default=None,
+                    help="カンマ区切り元素指定 (例: Bi,Co,O)。未指定で全元素)")
+parser.add_argument("--orbital", type=str, default=None,
+                    help="分解表示する軌道 （例: Co.d）。指定するとその元素のd軌道を分解")
+parser.add_argument("--xmin",   type=float, default=-6.0, help="x軸の最小値 (eV)")
+parser.add_argument("--xmax",   type=float, default= 6.0, help="x軸の最大値 (eV)")
+parser.add_argument("--ymax",   type=float, default=None, help="y軸の最大値")
+parser.add_argument("--lloc",   type=str,   default="upper right",
+                    help="凡例の位置（例: 'upper right'）")
+parser.add_argument("--lloc_x", type=float, default=1.3,
+                    help="凡例の x 座標（bbox_to_anchor）")
+parser.add_argument("--lloc_y", type=float, default=1.0,
+                    help="凡例の y 座標（bbox_to_anchor）")
+parser.add_argument("--no-total", action="store_true", help="Total DOS を表示しない（*.pdos_tot）")
+args = parser.parse_args()
+
+# --- EFermi 自動取得 ---
+if args.EFermi is None:
+    for fn in ("get_gap.out","findgap.out"):
+        if os.path.exists(fn):
+            with open(fn) as f:
+                for L in f:
+                    if L.startswith("VBM:"):
+                        args.EFermi = float(L.split()[1])
+                        print(f"📥 EFermi = {args.EFermi:.3f} eV (from {fn})")
+                        break
+            break
+if args.EFermi is None:
+    raise RuntimeError("EFermi が指定されていません。--EFermi または get_gap.out を用いてください。")
+
+# --- 軌道ラベル ---
+orb_labels = {
+    "d": ["dz2", "dzx", "dzy", "dx2-y2", "dxy"],
+    "p": ["pz",   "px",  "py"],
+}
+
+# --- ファイル収集 ---
+files = [f for f in os.listdir('.') if re.search(r"\.pdos_atm#", f)]
+file_map = defaultdict(list)
+for fn in files:
+    m = re.search(r"atm#\d+\(([^)]+)\)_wfc#\d+\((\w+)\)", fn)
+    if not m: continue
+    full = m.group(1)      # Ex: "Co1"
+    orb  = m.group(2)      # Ex: "d","p","s"
+    elem = re.sub(r"\d+$", "", full)  # "Co1" -> "Co"
+    file_map[(elem, orb)].append(fn)
+
+# --- オプション処理 ---
+atoms_filter = set(args.atoms.split(",")) if args.atoms else None
+target = None
+if args.orbital:
+    if "." not in args.orbital:
+        raise ValueError("--orbital は Element.orbital の形式で指定してください")
+    elt, orb_t = args.orbital.split('.')  
+    target = (elt, orb_t)
+
+# --- 読み込み関数 ---
+def read_basic(fn, shift):
+    E,D = [],[]
+    with open(fn) as f:
+        for L in f:
+            if L.lstrip().startswith("#"): continue
+            parts=L.split();
+            if len(parts)<2: continue
+            try:
+                e = float(parts[0]) - shift
+                d = float(parts[1].replace('D','E'))
+            except: continue
+            E.append(e); D.append(d)
+    return np.array(E), np.array(D)
+
+def read_decomp(fn, shift, orb):
+    labels = orb_labels.get(orb)
+    if labels is None:
+        raise ValueError(f"軌道 '{orb}' は p または d を指定してください。")
+    n = len(labels)
+    E,T = [],[]
+    S = [[] for _ in range(n)]
+    with open(fn) as f:
+        for L in f:
+            if L.lstrip().startswith("#"): continue
+            parts=L.split()
+            if len(parts)<2+n: continue
+            try:
+                e = float(parts[0]) - shift
+                t = float(parts[1].replace('D','E'))
+            except: continue
+            E.append(e); T.append(t)
+            for i in range(n): S[i].append(float(parts[2+i].replace('D','E')))
+    return np.array(E), np.array(T), [np.array(s) for s in S]
+
+# --- プロット準備 ---
+plt.figure(figsize=(7,4))
+colors = plt.cm.tab10.colors
+idx=0; plotted=False
+
+# --- 各元素・軌道ごとに描画 ---
+for (elt, orb), flist in sorted(file_map.items()):
+    # atomsフィルタ
+    if atoms_filter and elt not in atoms_filter:
+        continue
+    # orbital指定あり時の振る舞い
+    if target:
+        # 指定軌道のみ
+        if (elt,orb)!=target: continue
+        if orb=='d':
+            # 合算＆分解プロット
+            E0=None; Tot_sum=None; Sub_sum=None
+            for fn in flist:
+                E,T,Subs=read_decomp(fn,args.EFermi,orb)
+                if E0 is None:
+                    E0=E; Tot_sum=T.copy(); Sub_sum=[s.copy() for s in Subs]
+                else:
+                    Tot_sum+=T
+                    for i in range(len(Subs)): Sub_sum[i]+=Subs[i]
+            for i,label in enumerate(orb_labels['d']):
+                c=colors[idx%10]
+                plt.plot(E0, Sub_sum[i], color=c, lw=1.2, label=f"{elt}.{label}")
+                plt.fill_between(E0,0,Sub_sum[i],alpha=0.2,color=c)
+                idx+=1
+            if not args.no_total:
+                plt.plot(E0,Tot_sum,color='gray',lw=1.2,label=f"{elt}-d total")
+                plt.fill_between(E0,0,Tot_sum,alpha=0.2,color='gray')
+            plotted=True
+            continue
+    # orbital未指定時 or decomposition対象外
+    # 各orb(s,p,d)をまとめてプロット
+    E0=None; DOS_sum=None
+    for fn in flist:
+        E,D = read_basic(fn,args.EFermi)
+        if E0 is None: E0=E; DOS_sum=D.copy()
+        else: DOS_sum+=D
+    c=colors[idx%10]
+    plt.plot(E0,DOS_sum,color=c,lw=1.2,label=f"{elt}-{orb}")
+    plt.fill_between(E0,0,DOS_sum,alpha=0.4,color=c)
+    idx+=1; plotted=True
+
+# --- Global total(pd os_tot) ---
+if not args.orbital and not args.no_total:
+    for fn in os.listdir('.'):
+        if fn.endswith('.pdos_tot'):
+            Et,Dt=read_basic(fn,args.EFermi)
+            plt.plot(Et,Dt,color='black',lw=1.2,label='Total DOS')
+            plt.fill_between(Et,0,Dt,alpha=0.2,color='black')
+            plotted=True
+            break
+
+if not plotted:
+    print("⚠️ プロット対象が見つかりませんでした。フィルタ条件をご確認ください。")
+    exit(1)
+
+# --- 描画設定 ---
+plt.axvline(0,color='gray',ls='--')
+plt.xlabel('Energy (eV)',fontsize=12)
+plt.ylabel('DOS (states/eV)',fontsize=12)
+plt.title('PDOS',fontsize=14)
+plt.xlim(args.xmin,args.xmax)
+if args.ymax is not None: plt.ylim(0,args.ymax)
+
+# --- 凡例表示 ---
+if args.lloc_x is not None and args.lloc_y is not None:
+    plt.legend(fontsize=10, loc=args.lloc,
+               bbox_to_anchor=(args.lloc_x,args.lloc_y))
+else:
+    plt.legend(fontsize=10, loc=args.lloc)
+
+plt.tight_layout()
+plt.savefig('pdos.pdf',bbox_inches='tight')
+print('✅ PDF 保存完了: pdos.pdf')
+
+# --- ここで自動表示 ---
+os.system("imgcat pdos.pdf")

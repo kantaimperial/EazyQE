@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euxo pipefail
+
+# --- ユーザー設定（必要に応じて編集） ---
+conv_encut=1                # 1=ON, 0=OFF (ENCUT 収束テスト)
+encut_start=70              # Ry
+encut_end=120               # Ry
+encut_step=10               # Ry
+
+conv_kpoint=1               # 1=ON, 0=OFF (KPOINT 収束テスト)
+kpoints_list="2 2 1,4 4 2,6 6 3"
+
+run_qe=1                    # 1=計算実行, 0=入力ファイルのみ出力
+             # 出力プレフィックス（ジョブ名などに利用）
+
+# --- CONFIG ファイルの出力 ---
+cat > CONFIG << EOF
+conv_encut="${conv_encut}"
+encut_start="${encut_start}"
+encut_end="${encut_end}"
+encut_step="${encut_step}"
+
+conv_kpoint="${conv_kpoint}"
+kpoints="${kpoints_list}"
+
+run_qe="${run_qe}"
+EOF
+
+
+echo "✅ CONFIG を生成しました."
+
+# --- Slurm ジョブスクリプトの出力 ---
+cat > job << EOF
+#!/bin/bash
+#============ Slurm Options ===========
+#SBATCH -p gr10622b         # Specify job queue name (partition name).
+#SBATCH -t 1:00:00         # Specify an elapsed time.
+#SBATCH --rsc p=14:t=1:c=1  # Specify the requested resource.
+##SBATCH -N 5
+#SBATCH -o %x.%j.out        # Standard output/error file
+#SBATCH -J qe_out           # Job name
+
+#============ Shell Script ============
+set -x
+srun pw.x < INCAR.in > OUTCAR.out
+EOF
+
+chmod +x job
+echo "✅ job を生成しました."

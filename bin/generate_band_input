@@ -1,0 +1,50 @@
+!/usr/bin/env bash
+set -e
+
+# ─────────────────────────────────────
+# INCAR.in から prefix を抽出
+# ─────────────────────────────────────
+PREFIX=$(grep -E "^[[:space:]]*prefix[[:space:]]*=" INCAR.in \
+         | sed -E "s/.*prefix[[:space:]]*=[[:space:]]*'([^']*)'.*/\1/")
+
+if [[ -z "$PREFIX" ]]; then
+  echo "ERROR: INCAR.in から prefix が見つかりませんでした。" >&2
+  exit 1
+fi
+
+# ─────────────────────────────────────
+# BAND.band.in の生成
+# ─────────────────────────────────────
+cat > BAND.band.in << EOF
+&BANDS
+    prefix = '$PREFIX',
+    outdir = './tmp/',
+    filband        = "band.dat"
+    lsym           = .FALSE.
+    spin_component = 1
+/
+EOF
+
+# ─────────────────────────────────────
+# job_band の生成
+# ─────────────────────────────────────
+cat > job_band << 'EOF'
+#!/bin/bash
+#============ Slurm Options ===========
+#SBATCH -p gr10622b         # Specify job queue name (partition name).
+#SBATCH -t 11:00:00         # Specify an elapsed time.
+#SBATCH --rsc p=28:t=1:c=1  # Specify the requested resource.
+##SBATCH -N 5
+#SBATCH -o %x.%j.out        # Specify the standard output/error output file for the job.
+#SBATCH -J qe_out
+#============ Shell Script ============
+set -x
+srun bands.x < BAND.band.in > BAND.band.out
+EOF
+
+chmod +x job_band
+
+# ─────────────────────────────────────
+# 完了メッセージ
+# ─────────────────────────────────────
+echo "✅ '$PREFIX'のBAND.band.inと job_band を生成しました。"

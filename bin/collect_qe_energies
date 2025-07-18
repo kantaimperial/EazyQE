@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+
+outfile="energy_summary.dat"
+
+# ── ヘッダー行を書き出し＆表示 ──
+echo -e "param_type\tparam_value\ttotal_energy(Ry)\tdE(Ry)\tdE(meV/atom)" | tee "$outfile"
+
+# ── total energy 行から値を抜き出す関数 ──
+get_energy() {
+  grep -E "total energy *=" "$1" | tail -n1 \
+    | sed -E 's/.*=[[:space:]]*([-+0-9.eE]+).*/\1/'
+}
+
+# ── １ディレクトリ分の処理を行う関数 ──
+process_dir() {
+  local type=$1 value=$2 out=$3 inc=$4
+  local ENERGY delta delta_mev
+
+  if grep -q "JOB DONE" "$out"; then
+    ENERGY=$(get_energy "$out")
+    if [[ -n $prev_energy ]]; then
+      delta=$(echo "$prev_energy - $ENERGY" | bc -l)
+      local delta_ev=$(echo "$delta * 13.605693" | bc -l)
+      local natoms=$(grep -E "^ *nat" "$inc" | head -n1 | grep -oE '[0-9]+')
+      delta_mev=$(echo "$delta_ev * 1000 / $natoms" | bc -l)
+    else
+      delta="-" delta_mev="-"
+    fi
+    prev_energy="$ENERGY"
+  else
+    ENERGY="not-converged" delta="-" delta_mev="-"
+  fi
+
+  printf "%s\t%s\t%s\t%s\t%s\n" \
+    "$type" "$value" "$ENERGY" "$delta" "$delta_mev" \
+    | tee -a "$outfile"
+}
+
+# ── ENCUTWFC テスト ──
+echo "🔍 Processing ENCUTWFC..."
+prev_energy=""
+for dir in $(ls -d ecut_*Ry/ 2>/dev/null | sort -V); do
+  # ディレクトリ名から数値部分だけ取り出し
+  val=${dir#ecut_}   # "70Ry/"
+  val=${val%Ry/}     # "70"
+  process_dir "ecutwfc" "$val" "${dir}OUTCAR.out" "${dir}INCAR.in"
+done
+
+# ── KPOINTS テスト ──
+echo "🔍 Processing KPOINTS..."
+prev_energy=""
+for dir in $(ls -d kpt_*/ 2>/dev/null | sort -V); do
+  raw=${dir#kpt_}; raw=${raw%/}    # "221"
+  val=$(echo "$raw" | sed -E 's/([0-9])([0-9])([0-9])/\1x\2x\3/')  # "2x2x1"
+  process_dir "kpoint" "$val" "${dir}OUTCAR.out" "${dir}INCAR.in"
+done

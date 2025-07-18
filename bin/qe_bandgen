@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+import re
+import sys
+import argparse
+from pymatgen.core import Structure, Lattice
+from pymatgen.symmetry.bandstructure import HighSymmKpath
+import numpy as np
+
+# --- 引数処理 ---
+parser = argparse.ArgumentParser(description="Generate QE band structure input (INCAR_band.in) from INCAR.in")
+parser.add_argument("input", help="Input QE INCAR.in file")
+parser.add_argument("--density", type=int, default=60, help="Total number of k-points for band structure path (default: 60)")
+parser.add_argument("--min_points", type=int, default=3, help="Minimum number of divisions per path segment")
+args = parser.parse_args()
+
+# --- ファイル読み込み ---
+with open(args.input, "r") as f:
+    lines = f.readlines()
+
+# --- 各セクションと構造情報の抽出 ---
+sections = {"control": [], "system": [], "electrons": [], "ions": [], "cell": []}
+species_lines, position_lines, cell_lines = [], [], []
+current_section = None
+mode = None
+
+for line in lines:
+    l = line.strip()
+    if l.startswith("&"):
+        current_section = l[1:].split()[0].lower()
+    elif l.startswith("/"):
+        current_section = None
+    elif current_section:
+        sections[current_section].append(line)
+    elif "ATOMIC_SPECIES" in l:
+        mode = "species"
+    elif "ATOMIC_POSITIONS" in l:
+        mode = "positions"
+    elif "CELL_PARAMETERS" in l:
+        mode = "cell"
+    elif mode == "species" and l and not l.lower().startswith("end"):
+        species_lines.append(l)
+    elif mode == "positions" and l and not l.lower().startswith("end"):
+        toks = l.split()
+        if len(toks) >= 4:
+            try:
+                [float(x) for x in toks[1:4]]
+                position_lines.append(l)
+            except ValueError:
+                pass
+    elif mode == "cell" and l:
+        parts = l.split()
+        if len(parts) == 3 and all(re.match(r"^[\d.\-Ee+]+$", p) for p in parts):
+            cell_lines.append(l)
+
+# --- 構造作成 ---
+lattice = Lattice([[float(x) for x in l.split()] for l in cell_lines])
+species = []
+coords = []
+for line in position_lines:
+    toks = line.split()
+    species.append(toks[0])
+    coords.append([float(x) for x in toks[1:4]])
+structure = Structure(lattice, species, coords, coords_are_cartesian=True)
+recip = structure.lattice.reciprocal_lattice.matrix
+
+# --- バンド構造用 k点パス生成 ---
+kpath = HighSymmKpath(structure)
+kpoints_dict = kpath.kpath["kpoints"]
+path = kpath.kpath["path"]
+
+segments = []
+lengths = []
+for segment in path:
+    for i in range(len(segment) - 1):
+        start_label = segment[i]
+        end_label = segment[i+1]
+        start_k = np.array(kpoints_dict[start_label])
+        end_k = np.array(kpoints_dict[end_label])
+        dvec = np.dot((end_k - start_k), recip)
+        length = np.linalg.norm(dvec)
+        segments.append((start_label, end_label, start_k, end_k))
+        lengths.append(length)
+total_length = sum(lengths)
+
+# 分割数決定（逆格子空間で等間隔 + 最低分割数）
+divisions = [max(args.min_points, int(round(args.density * l / total_length))) for l in lengths]
+
+# --- K点リスト生成（ラベル強制出力 + 連続重複除去） ---
+k_lines = []
+last_kpt = None
+for (start_label, end_label, start_k, end_k), div in zip(segments, divisions):
+    for i in range(div):
+        frac = i / div
+        kpt = (1 - frac) * start_k + frac * end_k
+        kpt_rounded = tuple(np.round(kpt, 6))
+        if last_kpt is None or not np.allclose(last_kpt, kpt_rounded):
+            label = f"! {start_label}" if i == 0 else ""
+            k_lines.append(("  ".join(f"{v:.6f}" for v in kpt), 1, label))
+            last_kpt = kpt_rounded
+    end_rounded = tuple(np.round(end_k, 6))
+    if not np.allclose(last_kpt, end_rounded):
+        k_lines.append(("  ".join(f"{v:.6f}" for v in end_k), 1, f"! {end_label}"))
+        last_kpt = end_rounded
+
+# --- controlセクションのcalculationを'bands'に書き換え ---
+sections["control"] = [re.sub(r"calculation\s*=.*", "  calculation = 'bands',", l) if "calculation" in l else l for l in sections["control"]]
+
+# --- 出力ファイル作成 ---
+with open("INCAR_band.in", "w") as f:
+    for sec, content in sections.items():
+        if content:
+            f.write(f"&{sec}\n{''.join(content)}/\n\n")
+    f.write("ATOMIC_SPECIES\n" + "\n".join(species_lines) + "\n\n")
+    f.write("ATOMIC_POSITIONS (angstrom)\n" + "\n".join(position_lines) + "\n\n")
+    f.write("CELL_PARAMETERS (angstrom)\n" + "\n".join(cell_lines) + "\n\n")
+    f.write("K_POINTS crystal_b\n")
+    f.write(f"{len(k_lines)}\n")
+    for k, div, comment in k_lines:
+        f.write(f"{k} {div:3d} {comment}\n")
+
+print("✅ INCAR_band.in を生成しました（逆格子空間距離に基づく等間隔分割＋ラベル強制出力＋連続重複削除）。")

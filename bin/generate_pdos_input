@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+
+import re
+import os
+
+# === 設定 ===
+incar_file = "INCAR.in"
+nscf_output_file = "OUTCAR.out"
+pdos_input_file = "PDOS.pdos.in"
+job_file = "job_pdos"
+
+# === 1. INCAR.in から prefix を抽出 ===
+with open(incar_file, "r") as f:
+    incar = f.read()
+
+match = re.search(r"prefix\s*=\s*['\"]([^'\"]+)['\"]", incar)
+if not match:
+    raise ValueError("INCAR.in 内で prefix が見つかりません。")
+prefix = match.group(1)
+
+# === 2. NSCF.out から Fermi energy を検出 ===
+if not os.path.exists(nscf_output_file):
+    raise FileNotFoundError(f"{nscf_output_file} が見つかりません。")
+
+fermi = None
+with open(nscf_output_file, "r") as f:
+    for line in f:
+        if "the Fermi energy is" in line:
+            fermi = float(line.split()[-2])
+            break
+
+if fermi is None:
+    raise ValueError("NSCF.out からフェルミエネルギーが見つかりませんでした。")
+
+# Emin, Emax をフェルミ準位 ±10 eV に設定
+Emin = round(fermi - 20.0, 3)
+Emax = round(fermi + 10.0, 3)
+
+# === 3. PDOS.pdos.in を生成 ===
+pdos_content = f"""&PROJWFC
+  prefix         = '{prefix}',
+  outdir         = './tmp/',
+  DeltaE         = 0.01,
+  Emin           = {Emin},
+  Emax           = {Emax},
+  ngauss         = 0,
+  degauss        = 0.01,
+/
+"""
+
+with open(pdos_input_file, "w") as f:
+    f.write(pdos_content)
+
+# === 4. job_pdos を生成 ===
+job_content = """#!/bin/bash
+#============ Slurm Options ===========
+#SBATCH -p gr10622b         # Specify job queue name (partition name).
+#SBATCH -t 1:00:00          # Specify an elapsed time.
+#SBATCH --rsc p=28:t=1:c=1 # Specify the requested resource.
+##SBATCH -N 5
+#SBATCH -o %x.%j.out        # Specify the standard output/error output file for the job.
+#SBATCH -J qe_out
+#============ Shell Script ============
+set -x
+srun projwfc.x < PDOS.pdos.in > PDOS.pdos.out
+"""
+
+with open(job_file, "w") as f:
+    f.write(job_content)
+
+print(f"✅ PDOS.pdos.in を生成しました (E_F = {fermi:.3f} eV, Emin = {Emin}, Emax = {Emax})")
+print(f"✅ Slurm ジョブスクリプト '{job_file}' も生成しました。")

@@ -1,0 +1,81 @@
+#!/bin/bash
+
+# 引数チェック
+if [ $# -ne 2 ]; then
+  echo "使い方: ./extract_final_structure.sh vc-relax.out INCAR.in"
+  exit 1
+fi
+
+out_file="$1"
+scf_file="$2"
+
+# 一時ファイル作成
+tmp_atoms=$(mktemp)
+tmp_cell=$(mktemp)
+tmp_scf=$(mktemp)
+
+# ==== 関数: 最終のキーワードセクションを抽出 ====
+extract_final_section() {
+  local keyword=$1
+  local outfile=$2
+
+  # キーワード行の行番号を後ろから探す
+  line_num=$(grep -n "$keyword" "$out_file" | tail -n1 | cut -d: -f1)
+
+  if [ -z "$line_num" ]; then
+    echo "❌ $keyword が $out_file に見つかりませんでした" >&2
+    return 1
+  fi
+
+  # 抽出開始
+  total_lines=$(wc -l < "$out_file")
+  tail -n $((total_lines - line_num + 1)) "$out_file" | awk -v key="$keyword" '
+    NR==1 { print; next }
+    /^[[:space:]]*$/ { exit }
+    /ATOMIC_POSITIONS|CELL_PARAMETERS|K_POINTS/ && NR>1 { exit }
+    { print }
+  ' > "$outfile"
+}
+
+# ==== 関数: 指定キーワードのブロックを置換 ====
+replace_section() {
+  local infile="$1"
+  local keyword="$2"
+  local blockfile="$3"
+  local outfile="$4"
+
+  awk -v key="$keyword" -v bfile="$blockfile" '
+    BEGIN {
+      while ((getline line < bfile) > 0) block[++n] = line
+      close(bfile)
+      in_block = 0
+    }
+    $0 ~ key {
+      for (i = 1; i <= n; i++) print block[i]
+      in_block = 1
+      next
+    }
+    in_block {
+      if ($0 ~ /ATOMIC_POSITIONS|CELL_PARAMETERS|K_POINTS/ || NF==0) {
+        print
+        in_block = 0
+      }
+      next
+    }
+    { print }
+  ' "$infile" > "$outfile"
+}
+
+# === セクション抽出 ===
+extract_final_section "ATOMIC_POSITIONS" "$tmp_atoms" || exit 1
+extract_final_section "CELL_PARAMETERS" "$tmp_cell" || exit 1
+
+# === ATOMIC_POSITIONS 置換 ===
+replace_section "$scf_file" "ATOMIC_POSITIONS" "$tmp_atoms" "$tmp_scf"
+# === CELL_PARAMETERS 置換（上書き対象は更新済ファイル）===
+replace_section "$tmp_scf" "CELL_PARAMETERS" "$tmp_cell" "$scf_file"
+
+# 後始末
+rm -f "$tmp_atoms" "$tmp_cell" "$tmp_scf"
+
+echo "✅ 最終の ATOMIC_POSITIONS と CELL_PARAMETERS を $scf_file に反映しました。"
