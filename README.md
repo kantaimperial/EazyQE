@@ -2,7 +2,8 @@
 Bash scripts for producing the input files and analyze/plot the results for Quantum Espresso.
 
 Calculation Map for Quantum Espresso
-<img width="1081" height="610" alt="image" src="https://github.com/user-attachments/assets/fbc7d905-4ec6-47da-8028-9bcc6fb57135" />
+<img width="1079" height="610" alt="image" src="https://github.com/user-attachments/assets/2ed5baca-74b5-4bf6-87b9-c49e6b1cc330" />
+
 
 ## Installation
 ```
@@ -93,7 +94,7 @@ vim INCAR.in (calclation = “scf”)
 ```
 run the calculation
 ```
-qe_bandgen7 INCAR.in (qe_bandgen7 will be updated)
+qe_bandgen INCAR.in (qe_bandgen will be updated)
 (kpoint is generated via [Pymatgen HighSymmKpath scheme](https://pymatgen.org/pymatgen.symmetry.html)
 mv INCAR_band.in INCAR.in
 vim INCAR.in 
