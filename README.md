@@ -1,6 +1,9 @@
 # EazyQE
 Bash scripts for producing the input files and analyze/plot the results for Quantum Espresso.
 
+Calculation Map for Quantum Espresso
+<img width="1081" height="610" alt="image" src="https://github.com/user-attachments/assets/fbc7d905-4ec6-47da-8028-9bcc6fb57135" />
+
 ## Installation
 ```
 git clone https://github.com/kantaimperial/EazyQE.git
@@ -73,6 +76,10 @@ sbatch job_pdos
 findgap XXX.dos
 plot_pdos (e.g. –-atoms Bi –orbital Bi.p)
 ```
+<img width="535" height="309" alt="image" src="https://github.com/user-attachments/assets/d2af1545-bd55-4069-8bd2-238564ff7d56" />
+
+
+
 plotting is referencing to [sumo](https://smtg-bham.github.io/sumo/sumo-dosplot.html)
 
 ## Band calculation
@@ -103,6 +110,7 @@ sbatch job_band
 plot_band band.dat --EFermi XX 
 (XX is VBM value determiend by get_gap in DOS calualtion
 ```
+<img width="480" height="322" alt="image" src="https://github.com/user-attachments/assets/84a2d8b1-9539-49c9-b425-262ea871960a" />
 
 
 
